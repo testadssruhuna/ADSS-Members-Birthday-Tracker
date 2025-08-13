@@ -1,97 +1,232 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>ADSS Members Birthday Tracker</title>
 
-  <!-- Tailwind CSS CDN -->
+  <!-- Tailwind CSS (CDN) -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Day.js CDN -->
+  <!-- Day.js (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
-  <!-- SheetJS CDN -->
+  <!-- SheetJS (CDN) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body class="bg-gradient-to-br from-blue-50 to-purple-100 min-h-screen">
-
   <!-- Header -->
-  <header class="bg-white shadow-lg p-6 text-center">
-    <h1 class="text-3xl font-bold text-blue-800">ADSS Members Birthday Tracker</h1>
-    <p class="text-gray-600">Data updates automatically from the Excel file in this repository</p>
+  <header class="bg-white shadow p-6">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-4">
+      <div>
+        <h1 class="text-2xl sm:text-3xl font-bold text-blue-800">ADSS Members Birthday Tracker</h1>
+        <p class="text-gray-600">Reads <code>members.xlsx</code> from this repository.</p>
+        <p id="status" class="text-sm text-gray-500 mt-1">Loading…</p>
+        <p id="lastUpdated" class="text-xs text-gray-500"></p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="reloadBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700">Reload Data</button>
+      </div>
+    </div>
   </header>
 
-  <!-- Dashboard -->
-  <section class="p-6">
-    <h2 class="text-xl font-semibold text-gray-800 mb-4">🎂 Upcoming Birthdays</h2>
-    <div id="dashboard" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      <!-- Cards will appear here -->
+  <!-- Summary -->
+  <section class="max-w-5xl mx-auto p-6">
+    <div id="summary" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div class="bg-white rounded-xl shadow p-4">
+        <p class="text-sm text-gray-500">Total Members</p>
+        <p id="totalMembers" class="text-2xl font-semibold">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <p class="text-sm text-gray-500">Next Birthday</p>
+        <p id="nextBirthday" class="text-2xl font-semibold">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <p class="text-sm text-gray-500">This Month</p>
+        <p id="thisMonthCount" class="text-2xl font-semibold">—</p>
+      </div>
     </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section class="max-w-5xl mx-auto p-6">
+    <h2 class="text-xl font-semibold text-gray-800 mb-4">🎂 Upcoming Birthdays</h2>
+    <div id="dashboard" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></div>
+    <div id="errorBox" class="mt-4 hidden bg-red-50 text-red-700 border border-red-200 rounded p-3 text-sm"></div>
   </section>
 
   <script>
     const dashboard = document.getElementById('dashboard');
+    const statusEl = document.getElementById('status');
+    const errorBox = document.getElementById('errorBox');
+    const lastUpdatedEl = document.getElementById('lastUpdated');
+    const totalMembersEl = document.getElementById('totalMembers');
+    const nextBirthdayEl = document.getElementById('nextBirthday');
+    const thisMonthCountEl = document.getElementById('thisMonthCount');
+    const reloadBtn = document.getElementById('reloadBtn');
 
-    // Fetch Excel file directly from repo
-    fetch('members.xlsx')
-      .then(response => response.arrayBuffer())
-      .then(data => {
-        const workbook = XLSX.read(data, { type: 'array' });
+    // Expected column names (case-sensitive)
+    const REQUIRED_COLS = [
+      "Name with Initials",
+      "Preferred Name",
+      "Index Number",
+      "Date of Birth",
+      "Gender",
+      "Membership Type",
+      "Function"
+    ];
+
+    reloadBtn.addEventListener('click', () => {
+      loadExcel(true);
+    });
+
+    // Load on start
+    loadExcel(false);
+
+    async function loadExcel(bustCache = false) {
+      try {
+        setStatus("Loading data…");
+        hideError();
+
+        // Bust cache so updates show immediately
+        const cacheBuster = bustCache ? `?v=${Date.now()}` : "";
+        const url = `./members.xlsx${cacheBuster}`;
+
+        const resp = await fetch(url, { cache: "no-store" });
+        if (!resp.ok) {
+          throw new Error(`Failed to fetch members.xlsx (${resp.status})`);
+        }
+
+        const lastMod = resp.headers.get("Last-Modified");
+        if (lastMod) {
+          lastUpdatedEl.textContent = `Last updated: ${new Date(lastMod).toLocaleString()}`;
+        } else {
+          lastUpdatedEl.textContent = "";
+        }
+
+        const arrayBuf = await resp.arrayBuffer();
+        const workbook = XLSX.read(arrayBuf, {
+          type: "array",
+          cellDates: true,  // return Date objects when possible
+          cellNF: false,
+          cellText: false
+        });
+
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(sheet);
-        displayBirthdays(jsonData);
-      })
-      .catch(err => {
-        console.error("Error loading Excel file:", err);
-        dashboard.innerHTML = `<p class="text-red-500">⚠️ Unable to load members.xlsx</p>`;
-      });
+        // Keep raw so we can handle Date/number/string gracefully
+        const rows = XLSX.utils.sheet_to_json(sheet, { raw: true });
 
-    function displayBirthdays(data) {
-      dashboard.innerHTML = '';
+        validateColumns(rows);
+        render(rows);
+        setStatus("Data loaded ✔️");
+      } catch (err) {
+        console.error(err);
+        setStatus("Failed to load data");
+        showError(err.message + "<br/>Tips: ensure members.xlsx is in the same deployed folder (root or /docs), name matches exactly, and Pages is pointing to the same folder.");
+      }
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function showError(html) {
+      errorBox.innerHTML = html;
+      errorBox.classList.remove("hidden");
+    }
+    function hideError() {
+      errorBox.classList.add("hidden");
+      errorBox.innerHTML = "";
+    }
+
+    function validateColumns(rows) {
+      if (!rows || rows.length === 0) {
+        throw new Error("Excel appears empty or unreadable.");
+      }
+      const cols = Object.keys(rows[0] || {});
+      const missing = REQUIRED_COLS.filter(c => !cols.includes(c));
+      if (missing.length) {
+        throw new Error("Missing columns in Excel: <b>" + missing.join(", ") + "</b>");
+      }
+    }
+
+    function parseDOB(value) {
+      // Handles Date, Excel serial number, or string
+      if (value instanceof Date) {
+        return dayjs(value);
+      }
+      if (typeof value === "number") {
+        // Excel serial date -> JS Date
+        const d = XLSX.SSF.parse_date_code(value);
+        if (!d || !d.y) return null;
+        return dayjs(new Date(d.y, (d.m || 1) - 1, d.d || 1));
+      }
+      if (typeof value === "string") {
+        // Accepts ISO-like strings (YYYY-MM-DD) or many common formats
+        const dj = dayjs(value);
+        return dj.isValid() ? dj : null;
+      }
+      return null;
+    }
+
+    function render(data) {
+      dashboard.innerHTML = "";
       const today = dayjs();
 
-      let members = data.map(row => {
-        if (!row["Date of Birth"]) return null;
+      const members = data.map(row => {
+        const dob = parseDOB(row["Date of Birth"]);
+        if (!dob || !dob.isValid()) return null;
 
-        const bday = dayjs(row["Date of Birth"]);
-        let nextBday = bday.year(today.year());
-        if (nextBday.isBefore(today, 'day')) {
-          nextBday = nextBday.add(1, 'year');
-        }
-        const daysLeft = nextBday.diff(today, 'day');
+        let nextBday = dob.year(today.year());
+        if (nextBday.isBefore(today, "day")) nextBday = nextBday.add(1, "year");
+        const daysLeft = nextBday.diff(today, "day");
 
         return {
           nameInitials: row["Name with Initials"] || "",
           preferredName: row["Preferred Name"] || "",
           indexNo: row["Index Number"] || "",
-          dobDisplay: bday.format('MMMM D'),
           gender: row["Gender"] || "",
           membershipType: row["Membership Type"] || "",
           func: row["Function"] || "",
+          dobDisplay: dob.format("MMMM D"),
+          month: dob.month(), // 0..11
           daysLeft
         };
       }).filter(Boolean);
 
-      members.sort((a, b) => a.daysLeft - b.daysLeft);
+      // Update summary
+      totalMembersEl.textContent = members.length.toString();
 
-      members.forEach(member => {
-        const card = document.createElement('div');
-        card.className = "bg-white rounded-xl shadow-lg p-4 hover:shadow-2xl transition";
+      if (members.length) {
+        const sorted = [...members].sort((a, b) => a.daysLeft - b.daysLeft);
+        const next = sorted[0];
+        nextBirthdayEl.textContent = `${next.preferredName} • ${next.dobDisplay} • in ${next.daysLeft} days`;
+
+        const thisMonth = dayjs().month();
+        const thisMonthCount = members.filter(m => m.month === thisMonth).length;
+        thisMonthCountEl.textContent = thisMonthCount.toString();
+      } else {
+        nextBirthdayEl.textContent = "—";
+        thisMonthCountEl.textContent = "0";
+      }
+
+      // Sort and render cards
+      members.sort((a, b) => a.daysLeft - b.daysLeft);
+      members.forEach(m => {
+        const card = document.createElement("div");
+        card.className = "bg-white rounded-xl shadow p-4 hover:shadow-lg transition";
         card.innerHTML = `
-          <h3 class="text-lg font-bold text-blue-700">${member.preferredName} <span class="text-sm text-gray-500">(${member.nameInitials})</span></h3>
-          <p class="text-gray-600">🎂 ${member.dobDisplay}</p>
-          <p class="text-sm text-gray-500">⏳ ${member.daysLeft} days left</p>
-          <div class="mt-2 text-sm text-gray-700">
-            <p><strong>Index No:</strong> ${member.indexNo}</p>
-            <p><strong>Gender:</strong> ${member.gender}</p>
-            <p><strong>Membership:</strong> ${member.membershipType}</p>
-            <p><strong>Function:</strong> ${member.func}</p>
+          <h3 class="text-lg font-bold text-blue-700">${m.preferredName} <span class="text-sm text-gray-500">(${m.nameInitials})</span></h3>
+          <p class="text-gray-600">🎂 ${m.dobDisplay}</p>
+          <p class="text-sm text-gray-500">⏳ ${m.daysLeft} day(s) left</p>
+          <div class="mt-2 text-sm text-gray-700 space-y-0.5">
+            <p><b>Index No:</b> ${m.indexNo}</p>
+            <p><b>Gender:</b> ${m.gender}</p>
+            <p><b>Membership:</b> ${m.membershipType}</p>
+            <p><b>Function:</b> ${m.func}</p>
           </div>
         `;
         dashboard.appendChild(card);
       });
     }
   </script>
-
 </body>
 </html>
-
